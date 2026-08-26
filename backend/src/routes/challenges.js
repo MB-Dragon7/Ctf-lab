@@ -7,18 +7,19 @@ const router = Router();
 
 const lastSubmitByUser = new Map(); // simple in-memory rate limit: userId:challengeId -> timestamp
 
-function serializeChallenge(row, { includeSolvedFor } = {}) {
-  const hints = db
-    .prepare("SELECT id, text, deduction FROM hints WHERE challenge_id = ? ORDER BY order_index")
-    .all(row.id);
-  const files = db
-    .prepare("SELECT name, url, type FROM files WHERE challenge_id = ?")
-    .all(row.id);
+async function serializeChallenge(row, { includeSolvedFor } = {}) {
+  const hints = await db.all(
+    "SELECT id, text, deduction FROM hints WHERE challenge_id = ? ORDER BY order_index",
+    [row.id]
+  );
+  const files = await db.all("SELECT name, url, type FROM files WHERE challenge_id = ?", [row.id]);
   let solved = false;
   if (includeSolvedFor) {
-    solved = !!db
-      .prepare("SELECT 1 FROM solves WHERE user_id = ? AND challenge_id = ?")
-      .get(includeSolvedFor, row.id);
+    const s = await db.get(
+      "SELECT 1 AS present FROM solves WHERE user_id = ? AND challenge_id = ?",
+      [includeSolvedFor, row.id]
+    );
+    solved = !!s;
   }
   return {
     id: row.id,
@@ -45,50 +46,56 @@ function serializeChallenge(row, { includeSolvedFor } = {}) {
   };
 }
 
-router.get("/", optionalAuth, (req, res) => {
-  const rows = db.prepare("SELECT * FROM challenges WHERE status = 'Published' ORDER BY created_at DESC").all();
-  const userId = req.user?.id || null;
-  res.json({ challenges: rows.map((r) => serializeChallenge(r, { includeSolvedFor: userId })) });
+router.get("/", optionalAuth, async (req, res, next) => {
+  try {
+    const rows = await db.all("SELECT * FROM challenges WHERE status = 'Published' ORDER BY created_at DESC");
+    const userId = req.user?.id || null;
+    const challenges = await Promise.all(rows.map((r) => serializeChallenge(r, { includeSolvedFor: userId })));
+    res.json({ challenges });
+  } catch (e) { next(e); }
 });
 
-router.get("/:id", optionalAuth, (req, res) => {
-  const row = db.prepare("SELECT * FROM challenges WHERE id = ?").get(req.params.id);
-  if (!row || row.status !== "Published") return res.status(404).json({ error: "Challenge not found." });
-  const userId = req.user?.id || null;
-  res.json({ challenge: serializeChallenge(row, { includeSolvedFor: userId }) });
+router.get("/:id", optionalAuth, async (req, res, next) => {
+  try {
+    const row = await db.get("SELECT * FROM challenges WHERE id = ?", [req.params.id]);
+    if (!row || row.status !== "Published") return res.status(404).json({ error: "Challenge not found." });
+    const userId = req.user?.id || null;
+    res.json({ challenge: await serializeChallenge(row, { includeSolvedFor: userId }) });
+  } catch (e) { next(e); }
 });
 
-router.post("/:id/submit", requireAuth, (req, res) => {
-  const { flag } = req.body || {};
-  if (!flag || !flag.trim()) return res.status(400).json({ error: "Enter a flag first." });
+router.post("/:id/submit", requireAuth, async (req, res, next) => {
+  try {
+    const { flag } = req.body || {};
+    if (!flag || !flag.trim()) return res.status(400).json({ error: "Enter a flag first." });
 
-  const rateKey = `${req.user.id}:${req.params.id}`;
-  const now = Date.now();
-  const last = lastSubmitByUser.get(rateKey) || 0;
-  if (now - last < 1500) return res.status(429).json({ error: "Slow down — try again in a moment." });
-  lastSubmitByUser.set(rateKey, now);
+    const rateKey = `${req.user.id}:${req.params.id}`;
+    const now = Date.now();
+    const last = lastSubmitByUser.get(rateKey) || 0;
+    if (now - last < 1500) return res.status(429).json({ error: "Slow down — try again in a moment." });
+    lastSubmitByUser.set(rateKey, now);
 
-  const challenge = db.prepare("SELECT * FROM challenges WHERE id = ?").get(req.params.id);
-  if (!challenge || challenge.status !== "Published") return res.status(404).json({ error: "Challenge not found." });
+    const challenge = await db.get("SELECT * FROM challenges WHERE id = ?", [req.params.id]);
+    if (!challenge || challenge.status !== "Published") return res.status(404).json({ error: "Challenge not found." });
 
-  const alreadySolved = db
-    .prepare("SELECT 1 FROM solves WHERE user_id = ? AND challenge_id = ?")
-    .get(req.user.id, challenge.id);
-  if (alreadySolved) return res.status(409).json({ error: "You've already solved this challenge.", correct: true });
+    const alreadySolved = await db.get(
+      "SELECT 1 AS present FROM solves WHERE user_id = ? AND challenge_id = ?",
+      [req.user.id, challenge.id]
+    );
+    if (alreadySolved) return res.status(409).json({ error: "You've already solved this challenge.", correct: true });
 
-  const correct = bcrypt.compareSync(flag.trim(), challenge.flag_hash);
-  if (!correct) return res.json({ correct: false });
+    const correct = bcrypt.compareSync(flag.trim(), challenge.flag_hash);
+    if (!correct) return res.json({ correct: false });
 
-  const tx = db.transaction(() => {
-    db.prepare(
-      "INSERT INTO solves (user_id, challenge_id, points_earned, hints_used) VALUES (?, ?, ?, ?)"
-    ).run(req.user.id, challenge.id, challenge.points, 0);
-    db.prepare("UPDATE challenges SET solve_count = solve_count + 1 WHERE id = ?").run(challenge.id);
-    db.prepare("UPDATE users SET total_points = total_points + ? WHERE id = ?").run(challenge.points, req.user.id);
-  });
-  tx();
+    await db.run(
+      "INSERT INTO solves (user_id, challenge_id, points_earned, hints_used) VALUES (?, ?, ?, ?)",
+      [req.user.id, challenge.id, challenge.points, 0]
+    );
+    await db.run("UPDATE challenges SET solve_count = solve_count + 1 WHERE id = ?", [challenge.id]);
+    await db.run("UPDATE users SET total_points = total_points + ? WHERE id = ?", [challenge.points, req.user.id]);
 
-  res.json({ correct: true, pointsEarned: challenge.points });
+    res.json({ correct: true, pointsEarned: challenge.points });
+  } catch (e) { next(e); }
 });
 
 export default router;
