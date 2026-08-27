@@ -13,6 +13,10 @@ async function serializeChallenge(row, { includeSolvedFor } = {}) {
     [row.id]
   );
   const files = await db.all("SELECT name, url, type FROM files WHERE challenge_id = ?", [row.id]);
+  const customBlocks = await db.all(
+    "SELECT title, content FROM challenge_blocks WHERE challenge_id = ? ORDER BY order_index",
+    [row.id]
+  );
   let solved = false;
   if (includeSolvedFor) {
     const s = await db.get(
@@ -42,6 +46,7 @@ async function serializeChallenge(row, { includeSolvedFor } = {}) {
     updatedAt: row.updated_at,
     hints,
     files,
+    customBlocks,
     solved,
   };
 }

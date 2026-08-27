@@ -17,12 +17,13 @@ async function nextChallengeCode() {
 async function serializeFull(row) {
   const hints = await db.all("SELECT id, text, deduction FROM hints WHERE challenge_id = ? ORDER BY order_index", [row.id]);
   const files = await db.all("SELECT id, name, url, type FROM files WHERE challenge_id = ?", [row.id]);
+  const customBlocks = await db.all("SELECT id, title, content FROM challenge_blocks WHERE challenge_id = ? ORDER BY order_index", [row.id]);
   return {
     id: row.id, challengeCode: row.challenge_code, title: row.title, slug: row.slug, category: row.category,
     difficulty: row.difficulty, points: row.points, shortDescription: row.short_description, description: row.description,
     learningObjective: row.learning_objective, instructions: row.instructions, author: row.author, status: row.status,
     imageUrl: row.image_url, audioUrl: row.audio_url, solveCount: row.solve_count, createdAt: row.created_at,
-    updatedAt: row.updated_at, hints, files,
+    updatedAt: row.updated_at, hints, files, customBlocks,
   };
 }
 
@@ -72,6 +73,13 @@ router.post("/challenges", async (req, res, next) => {
         await db.run("INSERT INTO files (challenge_id, name, url, type) VALUES (?, ?, ?, ?)", [challengeId, f.name, f.url, f.type || ""]);
       }
     }
+    for (let i = 0; i < (b.customBlocks || []).length; i++) {
+      const cb = b.customBlocks[i];
+      if (cb.title && cb.title.trim() && cb.content && cb.content.trim()) {
+        await db.run("INSERT INTO challenge_blocks (challenge_id, title, content, order_index) VALUES (?, ?, ?, ?)",
+          [challengeId, cb.title.trim(), cb.content.trim(), i]);
+      }
+    }
 
     const row = await db.get("SELECT * FROM challenges WHERE id = ?", [challengeId]);
     res.status(201).json({ challenge: await serializeFull(row) });
@@ -113,6 +121,16 @@ router.put("/challenges/:id", async (req, res, next) => {
       for (const f of b.files) {
         if (f.name && f.url) {
           await db.run("INSERT INTO files (challenge_id, name, url, type) VALUES (?, ?, ?, ?)", [req.params.id, f.name, f.url, f.type || ""]);
+        }
+      }
+    }
+    if (b.customBlocks) {
+      await db.run("DELETE FROM challenge_blocks WHERE challenge_id = ?", [req.params.id]);
+      for (let i = 0; i < b.customBlocks.length; i++) {
+        const cb = b.customBlocks[i];
+        if (cb.title && cb.title.trim() && cb.content && cb.content.trim()) {
+          await db.run("INSERT INTO challenge_blocks (challenge_id, title, content, order_index) VALUES (?, ?, ?, ?)",
+            [req.params.id, cb.title.trim(), cb.content.trim(), i]);
         }
       }
     }
