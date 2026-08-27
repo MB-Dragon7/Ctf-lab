@@ -6,6 +6,7 @@ import {
   X, Flag, Eye, EyeOff, Archive, Music, Paperclip, LayoutDashboard
 } from "lucide-react";
 import { api, setToken } from "./api.js";
+import { getSpecialChallengeByHash } from "./specialChallenges.js";
 
 const C = {
   bg: "#070B0D", bg2: "#0D1317", card: "#111A1F", cardBorder: "#1C282E",
@@ -81,6 +82,7 @@ export default function App() {
   const [view, setView] = useState("home");
   const [selectedId, setSelectedId] = useState(null);
   const [editingId, setEditingId] = useState(null);
+  const [activeSpecial, setActiveSpecial] = useState(null);
   const [challenges, setChallenges] = useState([]);
   const [adminChallenges, setAdminChallenges] = useState([]);
   const [leaderboard, setLeaderboard] = useState([]);
@@ -110,6 +112,15 @@ export default function App() {
   const refreshAdminStats = useCallback(async () => {
     try { const stats = await api.adminStats(); setAdminStats(stats); }
     catch (e) { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    const hash = window.location.hash.replace("#", "");
+    const match = getSpecialChallengeByHash(hash);
+    if (match) {
+      setActiveSpecial(match);
+      setView("special");
+    }
   }, []);
 
   useEffect(() => {
@@ -209,6 +220,7 @@ export default function App() {
         {view === "challenges" && <ChallengesView challenges={challenges} goto={goto} currentUser={currentUser} />}
         {view === "detail" && <ChallengeDetailView challenge={challenges.find((c) => c.id === selectedId)} currentUser={currentUser} goto={goto} onSubmit={handleSubmitFlag} />}
         {view === "leaderboard" && <LeaderboardView leaderboard={leaderboard} />}
+        {view === "special" && activeSpecial && <activeSpecial.Component />}
         {view === "rules" && <RulesView />}
         {view === "about" && <AboutView />}
         {view === "auth" && <AuthView onLogin={handleLogin} onRegister={handleRegister} />}
@@ -381,6 +393,37 @@ function ChallengeDetailView({ challenge, currentUser, goto, onSubmit }) {
   const [guess, setGuess] = useState("");
   const [revealedHints, setRevealedHints] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [liveStatus, setLiveStatus] = useState(null); // null | { takenOver, error? }
+  const [liveChecking, setLiveChecking] = useState(false);
+
+  // Generic hook: if this challenge's Instructions contain [[special:<hash>]],
+  // look up that plugin's checkStatus() (from specialChallenges.js) and poll
+  // it in the background, auto-filling the flag box once it succeeds. This
+  // is the only place that needs to exist for ANY future live challenge —
+  // adding a new one is just a new file in special-challenges/, nothing here.
+  const specialMatch = challenge?.instructions?.match(/\[\[special:([a-z0-9-]+)\]\]/i);
+  const special = specialMatch ? getSpecialChallengeByHash(specialMatch[1]) : null;
+  const cleanInstructions = challenge?.instructions?.replace(/\[\[special:[a-z0-9-]+\]\]/gi, "").trim();
+
+  useEffect(() => {
+    if (!special?.checkStatus || challenge?.solved) return;
+    let stopped = false;
+    async function poll() {
+      setLiveChecking(true);
+      try {
+        const result = await special.checkStatus();
+        if (stopped) return;
+        setLiveStatus(result);
+        if (result.takenOver && result.flag) setGuess(result.flag);
+      } catch (e) {
+        if (!stopped) setLiveStatus({ takenOver: false, error: e.message });
+      }
+      if (!stopped) setLiveChecking(false);
+    }
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => { stopped = true; clearInterval(id); };
+  }, [special, challenge?.id, challenge?.solved]);
 
   if (!challenge) return <Panel>Challenge not found. <span onClick={() => goto("challenges")} style={{ color: C.cyan, cursor: "pointer" }}>Back to challenges</span></Panel>;
 
@@ -410,8 +453,20 @@ function ChallengeDetailView({ challenge, currentUser, goto, onSubmit }) {
         <SectionLabel>Description</SectionLabel>
         <p style={{ fontSize: 14, lineHeight: 1.7, color: C.text }}>{challenge.description}</p>
         {challenge.learningObjective && <><SectionLabel>Learning Objective</SectionLabel><p style={{ fontSize: 13, lineHeight: 1.7, color: C.muted }}>{challenge.learningObjective}</p></>}
-        {challenge.instructions && <><SectionLabel>Instructions</SectionLabel><p style={{ fontSize: 13, lineHeight: 1.7, color: C.muted }}>{challenge.instructions}</p></>}
+        {cleanInstructions && <><SectionLabel>Instructions</SectionLabel><p style={{ fontSize: 13, lineHeight: 1.7, color: C.muted }}>{cleanInstructions}</p></>}
       </Panel>
+      {special && !challenge.solved && (
+        <Panel style={{ marginBottom: 18 }}>
+          <SectionLabel>Live Status</SectionLabel>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 10, height: 10, borderRadius: "50%", background: liveStatus?.takenOver ? C.green : liveChecking ? C.warning : C.error }} />
+            <span style={{ fontSize: 13, color: C.text }}>
+              {liveStatus?.takenOver ? "Takeover confirmed — flag filled in below." : liveChecking ? "Checking..." : "Not detected yet. Checking every 5 seconds."}
+            </span>
+          </div>
+          {liveStatus?.error && <div style={{ fontSize: 11, color: C.muted, marginTop: 8 }}>{liveStatus.error}</div>}
+        </Panel>
+      )}
       {(challenge.imageUrl || challenge.audioUrl || (challenge.files && challenge.files.length > 0)) && (
         <Panel style={{ marginBottom: 18 }}>
           <SectionLabel>Attachments</SectionLabel>

@@ -26,6 +26,11 @@ async function request(path, { method = "GET", body, auth = false } = {}) {
   return data;
 }
 
+// Exposed so special-challenge plugin files can call their own custom
+// backend endpoints (e.g. /special/<id>) without needing this file edited
+// every time a new plugin is added.
+export const apiRequest = request;
+
 export const api = {
   register: (username, email, password) => request("/auth/register", { method: "POST", body: { username, email, password } }),
   login: (username, password) => request("/auth/login", { method: "POST", body: { username, password } }),
