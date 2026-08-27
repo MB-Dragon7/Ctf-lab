@@ -6,6 +6,7 @@ import authRoutes from "./routes/auth.js";
 import challengeRoutes from "./routes/challenges.js";
 import leaderboardRoutes from "./routes/leaderboard.js";
 import adminRoutes from "./routes/admin.js";
+import { loadSpecialChallenges } from "./specialChallenges/loader.js";
 
 async function main() {
   if (!process.env.JWT_SECRET) {
@@ -29,6 +30,7 @@ async function main() {
   app.use("/api/challenges", challengeRoutes);
   app.use("/api/leaderboard", leaderboardRoutes);
   app.use("/api/admin", adminRoutes);
+  await loadSpecialChallenges(app);
 
   app.use((req, res) => res.status(404).json({ error: "Not found." }));
   app.use((err, req, res, next) => {
