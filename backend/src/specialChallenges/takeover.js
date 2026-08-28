@@ -81,7 +81,10 @@ router.get("/", async (req, res) => {
   }
 
   try {
-    const r = await fetch(targetUrl, { redirect: "follow" });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    const r = await fetch(targetUrl, { redirect: "follow", signal: controller.signal });
+    clearTimeout(timeout);
     const text = await r.text();
     const takenOver = r.ok && !text.includes(notFoundMarker);
 
@@ -91,7 +94,8 @@ router.get("/", async (req, res) => {
     }
     return res.json({ takenOver: false, checkedAt: new Date().toISOString() });
   } catch (e) {
-    return res.json({ takenOver: false, error: "Target didn't respond — try again in a moment.", checkedAt: new Date().toISOString() });
+    console.error("[takeover] fetch to target failed:", e.message);
+    return res.json({ takenOver: false, error: `Debug: ${e.message}`, checkedAt: new Date().toISOString() });
   }
 });
 
