@@ -9,17 +9,15 @@ import { Router } from "express";
 
 const router = Router();
 
-// In-memory reset timer. Not durable across server restarts, which is fine
-// for a practice platform — if the server restarts mid-timer, the timer
-// just doesn't fire; re-check the target and it'll pick back up next solve.
-let resetTimer = null;
+// Instead of a passive background setTimeout (which can silently get lost
+// on some hosting platforms if the process is throttled), we just remember
+// WHEN the takeover was first detected, and check the elapsed time on every
+// incoming request. Whichever request first crosses the delay threshold
+// triggers the reset. This is self-healing — it can't get "lost".
+let firstDetectedAt = null;
 let resetInProgress = false;
+let lastResetAt = null;
 
-// Reclaims the custom domain onto our own "holder" GitHub Pages repo (which
-// works because we own the DNS, so GitHub lets us verify it), then
-// immediately releases it again. Net effect: the solver's claim is kicked
-// out, and the domain ends up fully unclaimed again — vulnerable for the
-// next solver — without ever needing access to the solver's own account.
 async function reclaimAndReleaseDomain() {
   resetInProgress = true;
   const token = process.env.GITHUB_TOKEN;
@@ -29,7 +27,6 @@ async function reclaimAndReleaseDomain() {
   if (!token || !holderRepo || !domain) {
     console.log("[takeover] reset skipped — GITHUB_TOKEN / GITHUB_HOLDER_REPO / TAKEOVER_TARGET_DOMAIN not fully configured");
     resetInProgress = false;
-    resetTimer = null;
     return;
   }
 
@@ -56,19 +53,13 @@ async function reclaimAndReleaseDomain() {
       body: JSON.stringify({ cname: null }),
     });
     console.log(`[takeover] release call status: ${releaseRes.status} — subdomain should be dangling again`);
+    lastResetAt = Date.now();
   } catch (e) {
     console.error("[takeover] reclaim/release failed:", e.message);
   }
 
+  firstDetectedAt = null;
   resetInProgress = false;
-  resetTimer = null;
-}
-
-function scheduleResetIfNeeded() {
-  if (resetTimer || resetInProgress) return; // already scheduled or running
-  const minutes = Number(process.env.TAKEOVER_RESET_DELAY_MINUTES) || 3;
-  resetTimer = setTimeout(reclaimAndReleaseDomain, minutes * 60 * 1000);
-  console.log(`[takeover] takeover detected — auto-reset scheduled in ${minutes} minute(s)`);
 }
 
 async function checkTarget(targetUrl, notFoundMarker) {
@@ -77,9 +68,6 @@ async function checkTarget(targetUrl, notFoundMarker) {
   try {
     const r = await fetch(targetUrl, { redirect: "manual", signal: controller.signal });
     clearTimeout(timeout);
-    // A redirect (e.g. forced HTTPS) only happens once a domain is actively
-    // claimed and configured — an unclaimed/dangling domain just serves a
-    // plain 404 on http, never a redirect. So treat any redirect as taken.
     if (r.status >= 300 && r.status < 400) return true;
     if (!r.ok) return false;
     const text = await r.text();
@@ -94,6 +82,7 @@ router.get("/", async (req, res) => {
   const targetUrl = process.env.TAKEOVER_TARGET_URL;
   const flag = process.env.TAKEOVER_FLAG;
   const notFoundMarker = process.env.TAKEOVER_NOT_FOUND_MARKER || "There isn't a GitHub Pages site here";
+  const delayMs = (Number(process.env.TAKEOVER_RESET_DELAY_MINUTES) || 3) * 60 * 1000;
 
   if (!targetUrl || !flag) {
     return res.status(500).json({ error: "This challenge isn't configured on the server yet." });
@@ -113,14 +102,26 @@ router.get("/", async (req, res) => {
   }
 
   if (lastError) {
-    const causeInfo = lastError.cause ? `${lastError.cause.code || ""} ${lastError.cause.message || lastError.cause}`.trim() : "";
-    console.error("[takeover] all attempts failed:", lastError.message, causeInfo);
-    return res.json({ takenOver: false, checkedAt: new Date().toISOString(), _diag: `${lastError.message} | ${causeInfo}` });
+    return res.json({ takenOver: false, checkedAt: new Date().toISOString() });
   }
+
   if (takenOver) {
-    scheduleResetIfNeeded();
-    return res.json({ takenOver: true, flag, checkedAt: new Date().toISOString() });
+    if (!firstDetectedAt) {
+      firstDetectedAt = Date.now();
+      console.log(`[takeover] takeover detected at ${new Date(firstDetectedAt).toISOString()} — will reset once ${delayMs / 60000} min have elapsed`);
+    }
+    const elapsed = Date.now() - firstDetectedAt;
+    if (elapsed >= delayMs && !resetInProgress) {
+      console.log(`[takeover] ${Math.round(elapsed / 1000)}s elapsed — triggering reset now`);
+      reclaimAndReleaseDomain(); // fire and forget, don't block this response
+    }
+    return res.json({
+      takenOver: true, flag, checkedAt: new Date().toISOString(),
+      resetInMs: Math.max(0, delayMs - elapsed),
+    });
   }
+
+  firstDetectedAt = null;
   return res.json({ takenOver: false, checkedAt: new Date().toISOString() });
 });
 
