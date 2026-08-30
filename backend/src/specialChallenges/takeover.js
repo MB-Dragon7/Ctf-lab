@@ -113,7 +113,9 @@ router.get("/", async (req, res) => {
   }
 
   if (lastError) {
-    return res.json({ takenOver: false, checkedAt: new Date().toISOString() });
+    const causeInfo = lastError.cause ? `${lastError.cause.code || ""} ${lastError.cause.message || lastError.cause}`.trim() : "";
+    console.error("[takeover] all attempts failed:", lastError.message, causeInfo);
+    return res.json({ takenOver: false, checkedAt: new Date().toISOString(), _diag: `${lastError.message} | ${causeInfo}` });
   }
   if (takenOver) {
     scheduleResetIfNeeded();
