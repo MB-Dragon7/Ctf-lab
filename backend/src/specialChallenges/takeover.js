@@ -71,6 +71,25 @@ function scheduleResetIfNeeded() {
   console.log(`[takeover] takeover detected — auto-reset scheduled in ${minutes} minute(s)`);
 }
 
+async function checkTarget(targetUrl, notFoundMarker) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const r = await fetch(targetUrl, { redirect: "manual", signal: controller.signal });
+    clearTimeout(timeout);
+    // A redirect (e.g. forced HTTPS) only happens once a domain is actively
+    // claimed and configured — an unclaimed/dangling domain just serves a
+    // plain 404 on http, never a redirect. So treat any redirect as taken.
+    if (r.status >= 300 && r.status < 400) return true;
+    if (!r.ok) return false;
+    const text = await r.text();
+    return !text.includes(notFoundMarker);
+  } catch (e) {
+    clearTimeout(timeout);
+    throw e;
+  }
+}
+
 router.get("/", async (req, res) => {
   const targetUrl = process.env.TAKEOVER_TARGET_URL;
   const flag = process.env.TAKEOVER_FLAG;
@@ -80,23 +99,27 @@ router.get("/", async (req, res) => {
     return res.status(500).json({ error: "This challenge isn't configured on the server yet." });
   }
 
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    const r = await fetch(targetUrl, { redirect: "follow", signal: controller.signal });
-    clearTimeout(timeout);
-    const text = await r.text();
-    const takenOver = r.ok && !text.includes(notFoundMarker);
-
-    if (takenOver) {
-      scheduleResetIfNeeded();
-      return res.json({ takenOver: true, flag, checkedAt: new Date().toISOString() });
+  let takenOver = false;
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      takenOver = await checkTarget(targetUrl, notFoundMarker);
+      lastError = null;
+      break;
+    } catch (e) {
+      lastError = e;
+      await new Promise((r) => setTimeout(r, 1000));
     }
-    return res.json({ takenOver: false, checkedAt: new Date().toISOString() });
-  } catch (e) {
-    console.error("[takeover] fetch to target failed:", e.message);
-    return res.json({ takenOver: false, error: `Debug: ${e.message}`, checkedAt: new Date().toISOString() });
   }
+
+  if (lastError) {
+    return res.json({ takenOver: false, checkedAt: new Date().toISOString() });
+  }
+  if (takenOver) {
+    scheduleResetIfNeeded();
+    return res.json({ takenOver: true, flag, checkedAt: new Date().toISOString() });
+  }
+  return res.json({ takenOver: false, checkedAt: new Date().toISOString() });
 });
 
 export default router;
